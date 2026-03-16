@@ -48,6 +48,41 @@ export default function TraceDetailModal({
     }
   }, [isOpen, traceMongoId, fetchTraceDetails]);
 
+  const formatDate = (dateValue: any): string => {
+    if (!dateValue) return '-';
+    
+    // Handle MongoDB date format { "$date": "..." }
+    if (typeof dateValue === 'object' && dateValue.$date) {
+      return new Date(dateValue.$date).toLocaleString();
+    }
+    
+    // Handle regular date string or timestamp
+    if (typeof dateValue === 'string' || typeof dateValue === 'number') {
+      return new Date(dateValue).toLocaleString();
+    }
+    
+    return '-';
+  };
+
+  const formatDuration = (startTime: any, endTime: any, duration?: number): string => {
+    if (duration !== undefined) {
+      return `${duration} ms`;
+    }
+    
+    const start = startTime?.$date ? new Date(startTime.$date).getTime() : 
+                  (typeof startTime === 'number' ? startTime : 
+                   (typeof startTime === 'string' ? new Date(startTime).getTime() : null));
+    const end = endTime?.$date ? new Date(endTime.$date).getTime() : 
+                (typeof endTime === 'number' ? endTime : 
+                 (typeof endTime === 'string' ? new Date(endTime).getTime() : null));
+    
+    if (start && end) {
+      return `${end - start} ms`;
+    }
+    
+    return '-';
+  };
+
   if (!isOpen) return null;
 
   return (
@@ -197,19 +232,13 @@ export default function TraceDetailModal({
                             {span.name || '-'}
                           </td>
                           <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
-                            {span.startTime
-                              ? new Date(span.startTime).toLocaleString()
-                              : '-'}
+                            {formatDate(span.startTime)}
                           </td>
                           <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
-                            {span.endTime
-                              ? new Date(span.endTime).toLocaleString()
-                              : '-'}
+                            {formatDate(span.endTime)}
                           </td>
                           <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
-                            {span.startTime && span.endTime
-                              ? `${span.endTime - span.startTime} ms`
-                              : '-'}
+                            {formatDuration(span.startTime, span.endTime, span.duration)}
                           </td>
                         </tr>
                       ))}
