@@ -14,10 +14,19 @@ export interface StatsQueryParams {
   from?: string;
   to?: string;
   serviceName?: string;
-  /** default true on backend = HTTP server spans only */
-  serverOnly?: boolean;
   limit?: number;
   bucket?: StatsBucket;
+}
+
+/** Echoed query / semantics from GET /api/stats */
+export interface StatsPeriod {
+  from: string;
+  to: string;
+  bucket: string;
+  serverOnly: boolean;
+  serviceNameFilter: string | null;
+  httpErrors?: boolean;
+  failureCountsAs?: string;
 }
 
 export interface StatsOverview {
@@ -27,6 +36,12 @@ export interface StatsOverview {
   successRatePercent: number;
   errorRatePercent: number;
   avgDurationMs: number;
+  minDurationMs?: number;
+  maxDurationMs?: number;
+  p50DurationMs?: number;
+  p95DurationMs?: number;
+  p99DurationMs?: number;
+  /** legacy field names (older API) */
   min?: number;
   max?: number;
   p50?: number;
@@ -35,7 +50,9 @@ export interface StatsOverview {
 }
 
 export interface TimeSeriesPoint {
-  /** ISO bucket start or label from API */
+  /** ISO bucket start (current API) */
+  bucketStart?: string;
+  /** legacy / alternate names */
   bucket?: string;
   at?: string;
   t?: string;
@@ -63,8 +80,10 @@ export interface RankedEndpoint {
   errors?: number;
   successRatePercent?: number;
   successRate?: number;
+  successful?: number;
   avgDurationMs?: number;
   avgMs?: number;
+  maxDurationMs?: number;
   p95?: number;
   [key: string]: unknown;
 }
@@ -74,7 +93,9 @@ export interface ByServiceRow {
   service?: string;
   totalRequests?: number;
   total?: number;
+  successful?: number;
   successfulRequests?: number;
+  failed?: number;
   failedRequests?: number;
   failures?: number;
   successRatePercent?: number;
@@ -82,24 +103,59 @@ export interface ByServiceRow {
   [key: string]: unknown;
 }
 
+/** Collection / query diagnostics from GET /api/stats */
+export interface StatsDiagnostics {
+  documentsInTimeRange?: number;
+  documentsAfterFilters?: number;
+  estimatedTotalInCollection?: number;
+  [key: string]: unknown;
+}
+
 export interface DashboardStatsResponse {
+  period?: StatsPeriod;
   overview: StatsOverview;
   timeSeries: TimeSeriesPoint[];
   frequentlyFailingApis: RankedEndpoint[];
   slowestApis: RankedEndpoint[];
   byService: ByServiceRow[];
+  diagnostics?: StatsDiagnostics;
 }
 
 function toQuery(params?: StatsQueryParams): Record<string, string | number | boolean> {
-  if (!params) return {};
-  const q: Record<string, string | number | boolean> = {};
+  const q: Record<string, string | number | boolean> = { serverOnly: false };
+  if (!params) return q;
   if (params.from) q.from = params.from;
   if (params.to) q.to = params.to;
   if (params.serviceName) q.serviceName = params.serviceName;
-  if (params.serverOnly !== undefined) q.serverOnly = params.serverOnly;
   if (params.limit != null) q.limit = params.limit;
   if (params.bucket) q.bucket = params.bucket;
   return q;
+}
+
+/** Read latency fields from current or legacy overview shape */
+export function overviewMinMs(o: StatsOverview): number | undefined {
+  const v = o.minDurationMs ?? o.min;
+  return v != null ? Number(v) : undefined;
+}
+
+export function overviewMaxMs(o: StatsOverview): number | undefined {
+  const v = o.maxDurationMs ?? o.max;
+  return v != null ? Number(v) : undefined;
+}
+
+export function overviewP50Ms(o: StatsOverview): number | undefined {
+  const v = o.p50DurationMs ?? o.p50;
+  return v != null ? Number(v) : undefined;
+}
+
+export function overviewP95Ms(o: StatsOverview): number | undefined {
+  const v = o.p95DurationMs ?? o.p95;
+  return v != null ? Number(v) : undefined;
+}
+
+export function overviewP99Ms(o: StatsOverview): number | undefined {
+  const v = o.p99DurationMs ?? o.p99;
+  return v != null ? Number(v) : undefined;
 }
 
 export const statsApi = {
@@ -163,13 +219,32 @@ export function defaultStatsRange(): { from: string; to: string } {
 }
 
 export function endpointLabel(row: RankedEndpoint): string {
-  const route = row.route ?? row.path ?? row.httpRoute ?? row.spanName ?? row.name ?? '';
+  if (row.name && String(row.name).trim()) return String(row.name).trim();
+  const route = row.route ?? row.path ?? row.httpRoute ?? row.spanName ?? '';
   const method = row.method ? `${row.method} ` : '';
   return `${method}${route}`.trim() || '(unknown)';
 }
 
 export function failuresCount(row: RankedEndpoint): number {
   return Number(row.failures ?? row.failed ?? row.failedCount ?? row.errors ?? 0);
+}
+
+export function successfulCount(row: RankedEndpoint): number | null {
+  if (row.successful != null) return Number(row.successful);
+  if (row.successfulRequests != null) return Number(row.successfulRequests);
+  return null;
+}
+
+export function endpointTotalCount(row: RankedEndpoint): number | null {
+  if (row.total != null) return Number(row.total);
+  if (row.requests != null) return Number(row.requests);
+  if (row.count != null) return Number(row.count);
+  return null;
+}
+
+export function maxDurationMs(row: RankedEndpoint): number | null {
+  if (row.maxDurationMs != null) return Number(row.maxDurationMs);
+  return null;
 }
 
 export function totalCount(row: RankedEndpoint): number {
@@ -188,9 +263,22 @@ export function avgDuration(row: RankedEndpoint): number | null {
   return null;
 }
 
+/** Raw ISO (or string) bucket start from API */
+export function timeSeriesBucketStartRaw(p: TimeSeriesPoint): string {
+  const raw = p.bucketStart ?? p.bucket ?? p.at ?? p.t;
+  return raw != null ? String(raw) : '';
+}
+
 export function timeSeriesBucketLabel(p: TimeSeriesPoint): string {
-  const raw = p.bucket ?? p.at ?? p.t;
+  const raw = timeSeriesBucketStartRaw(p);
   if (!raw) return '';
   const d = new Date(raw);
-  return Number.isNaN(d.getTime()) ? String(raw) : d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  return Number.isNaN(d.getTime())
+    ? raw
+    : d.toLocaleString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
 }

@@ -19,11 +19,21 @@ import {
   type TimeSeriesPoint,
   type RankedEndpoint,
   type ByServiceRow,
+  type StatsDiagnostics,
   endpointLabel,
   failuresCount,
+  successfulCount,
+  endpointTotalCount,
+  maxDurationMs,
   successRate,
   avgDuration,
   timeSeriesBucketLabel,
+  timeSeriesBucketStartRaw,
+  overviewMinMs,
+  overviewMaxMs,
+  overviewP50Ms,
+  overviewP95Ms,
+  overviewP99Ms,
 } from "@/lib/api/stats";
 
 function formatMs(ms: number | undefined): string {
@@ -35,6 +45,11 @@ function formatMs(ms: number | undefined): string {
 function formatPct(n: number | undefined): string {
   if (n == null || Number.isNaN(n)) return "—";
   return `${Number(n).toFixed(1)}%`;
+}
+
+function formatMsExact(ms: number | undefined): string {
+  if (ms == null || Number.isNaN(ms)) return "—";
+  return `${Number(ms).toLocaleString(undefined, { maximumFractionDigits: 2 })} ms`;
 }
 
 /** Preset window for stats API `from` / `to` (rolling from now, except custom). */
@@ -137,6 +152,8 @@ function KpiCard({
 
 type ChartRow = {
   name: string;
+  bucketStartISO: string;
+  total: number;
   success: number;
   failed: number;
   avgDurationMs: number;
@@ -147,18 +164,71 @@ function TimeSeriesTooltip({
   payload,
 }: {
   active?: boolean;
-  payload?: Array<{ payload: ChartRow }>;
+  payload?: ReadonlyArray<{ payload?: ChartRow }>;
 }) {
   if (!active || !payload?.length) return null;
-  const row = payload[0].payload;
+  const row = payload[0]?.payload;
+  if (!row) return null;
+  const bucketLabel = row.bucketStartISO
+    ? (() => {
+        const d = new Date(row.bucketStartISO);
+        return Number.isNaN(d.getTime())
+          ? row.bucketStartISO
+          : d.toLocaleString(undefined, {
+              weekday: "short",
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+            });
+      })()
+    : row.name;
+  const okPct =
+    row.total > 0 ? ((row.success / row.total) * 100).toFixed(1) : "—";
+  const failPct =
+    row.total > 0 ? ((row.failed / row.total) * 100).toFixed(1) : "—";
+
   return (
-    <div className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs shadow-lg">
-      <p className="mb-1 font-semibold text-gray-900">{row.name}</p>
-      <p className="text-emerald-700">Success: {row.success}</p>
-      <p className="text-rose-700">Failed: {row.failed}</p>
-      <p className="text-indigo-700">
-        Avg duration: {formatMs(row.avgDurationMs)}
+    <div className="max-w-xs rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-xs shadow-lg">
+      <p className="mb-2 border-b border-gray-100 pb-2 font-semibold text-gray-900">
+        {bucketLabel}
       </p>
+      {row.bucketStartISO ? (
+        <p className="mb-2 font-mono text-[10px] leading-relaxed text-gray-500 break-all">
+          bucketStart: {row.bucketStartISO}
+        </p>
+      ) : null}
+      <dl className="space-y-1.5 text-gray-800">
+        <div className="flex justify-between gap-4">
+          <dt className="text-gray-500">Total</dt>
+          <dd className="tabular-nums font-medium">{row.total}</dd>
+        </div>
+        <div className="flex justify-between gap-4">
+          <dt className="text-emerald-600">Success</dt>
+          <dd className="tabular-nums text-emerald-800">
+            {row.success}
+            {row.total > 0 ? ` (${okPct}%)` : ""}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-4">
+          <dt className="text-rose-600">Failed</dt>
+          <dd className="tabular-nums text-rose-800">
+            {row.failed}
+            {row.total > 0 ? ` (${failPct}%)` : ""}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-4 border-t border-gray-100 pt-1.5">
+          <dt className="text-indigo-600">Avg duration</dt>
+          <dd className="text-right text-indigo-900">
+            <span className="font-medium">{formatMs(row.avgDurationMs)}</span>
+            <span className="mt-0.5 block text-[10px] font-normal text-gray-500">
+              ({formatMsExact(row.avgDurationMs)})
+            </span>
+          </dd>
+        </div>
+      </dl>
     </div>
   );
 }
@@ -166,12 +236,22 @@ function TimeSeriesTooltip({
 function TimeSeriesChart({ points }: { points: TimeSeriesPoint[] }) {
   const chartData: ChartRow[] = useMemo(
     () =>
-      points.map((p) => ({
-        name: timeSeriesBucketLabel(p),
-        success: p.success ?? 0,
-        failed: p.failed ?? 0,
-        avgDurationMs: p.avgDurationMs ?? 0,
-      })),
+      points.map((p) => {
+        const success = p.success ?? 0;
+        const failed = p.failed ?? 0;
+        const total =
+          p.total != null && !Number.isNaN(Number(p.total))
+            ? Number(p.total)
+            : success + failed;
+        return {
+          name: timeSeriesBucketLabel(p),
+          bucketStartISO: timeSeriesBucketStartRaw(p),
+          total,
+          success,
+          failed,
+          avgDurationMs: Number(p.avgDurationMs ?? 0),
+        };
+      }),
     [points],
   );
 
@@ -274,13 +354,12 @@ function TimeSeriesChart({ points }: { points: TimeSeriesPoint[] }) {
 function EndpointsTable({
   title,
   rows,
-  showFailures,
-  showAvg,
+  mode = "default",
 }: {
   title: string;
   rows: RankedEndpoint[];
-  showFailures: boolean;
-  showAvg: boolean;
+  /** Full columns (same shape as frequentlyFailingApis / slowestApis) */
+  mode?: "default" | "ranked";
 }) {
   if (!rows?.length) {
     return (
@@ -290,6 +369,71 @@ function EndpointsTable({
       </div>
     );
   }
+
+  if (mode === "ranked") {
+    return (
+      <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div className="border-b border-gray-100 bg-gray-50 px-4 py-3">
+          <h3 className="text-sm font-semibold text-gray-900">{title}</h3>
+        </div>
+        <div className="max-h-96 overflow-auto">
+          <table className="min-w-full text-sm">
+            <thead className="sticky top-0 z-10 bg-white text-left text-xs font-semibold uppercase text-gray-500 shadow-sm">
+              <tr>
+                <th className="px-3 py-2">Endpoint</th>
+                <th className="px-3 py-2 text-right">Total</th>
+                <th className="px-3 py-2 text-right">Failed</th>
+                <th className="px-3 py-2 text-right">OK</th>
+                <th className="px-3 py-2 text-right">Success %</th>
+                <th className="px-3 py-2 text-right">Avg ms</th>
+                <th className="px-3 py-2 text-right">Max ms</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {rows.map((row, i) => {
+                const label = endpointLabel(row);
+                const total = endpointTotalCount(row);
+                const failed = failuresCount(row);
+                const ok = successfulCount(row);
+                const sr = successRate(row);
+                const avg = avgDuration(row);
+                const maxMs = maxDurationMs(row);
+                return (
+                  <tr key={i} className="hover:bg-gray-50/80">
+                    <td
+                      className="max-w-[min(28rem,55vw)] px-3 py-2 align-top font-mono text-xs text-gray-800 break-words whitespace-normal"
+                      title={label}
+                    >
+                      {label}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-gray-900">
+                      {total != null ? total : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-rose-700">
+                      {failed}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-emerald-800">
+                      {ok != null ? ok : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {sr != null ? formatPct(sr) : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-gray-700">
+                      {avg != null ? formatMsExact(avg) : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-gray-700">
+                      {maxMs != null ? formatMsExact(maxMs) : "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
       <div className="border-b border-gray-100 bg-gray-50 px-4 py-3">
@@ -300,13 +444,8 @@ function EndpointsTable({
           <thead className="sticky top-0 bg-white text-left text-xs font-semibold uppercase text-gray-500 shadow-sm">
             <tr>
               <th className="px-4 py-2">Endpoint</th>
-              {showFailures ? (
-                <th className="px-4 py-2 text-right">Failures</th>
-              ) : null}
               <th className="px-4 py-2 text-right">Success rate</th>
-              {showAvg ? (
-                <th className="px-4 py-2 text-right">Avg time</th>
-              ) : null}
+              <th className="px-4 py-2 text-right">Avg time</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
@@ -318,21 +457,14 @@ function EndpointsTable({
                 >
                   {endpointLabel(row)}
                 </td>
-                {showFailures ? (
-                  <td className="px-4 py-2 text-right tabular-nums text-rose-700">
-                    {failuresCount(row)}
-                  </td>
-                ) : null}
                 <td className="px-4 py-2 text-right tabular-nums">
                   {successRate(row) != null
                     ? formatPct(successRate(row)!)
                     : "—"}
                 </td>
-                {showAvg ? (
-                  <td className="px-4 py-2 text-right tabular-nums text-gray-700">
-                    {formatMs(avgDuration(row) ?? undefined)}
-                  </td>
-                ) : null}
+                <td className="px-4 py-2 text-right tabular-nums text-gray-700">
+                  {formatMs(avgDuration(row) ?? undefined)}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -351,11 +483,12 @@ function ByServiceTable({ rows }: { rows: ByServiceRow[] }) {
       </div>
       <div className="max-h-64 overflow-auto">
         <table className="min-w-full text-sm">
-          <thead className="sticky top-0 bg-white text-left text-xs font-semibold uppercase text-gray-500">
+          <thead className="sticky top-0 z-10 bg-white text-left text-xs font-semibold uppercase text-gray-500 shadow-sm">
             <tr>
               <th className="px-4 py-2">Service</th>
-              <th className="px-4 py-2 text-right">Requests</th>
+              <th className="px-4 py-2 text-right">Total</th>
               <th className="px-4 py-2 text-right">Failed</th>
+              <th className="px-4 py-2 text-right">OK</th>
               <th className="px-4 py-2 text-right">Success %</th>
               <th className="px-4 py-2 text-right">Avg ms</th>
             </tr>
@@ -363,8 +496,13 @@ function ByServiceTable({ rows }: { rows: ByServiceRow[] }) {
           <tbody className="divide-y divide-gray-100">
             {rows.map((row, i) => {
               const name = String(row.serviceName ?? row.service ?? "—");
-              const total = Number(row.totalRequests ?? row.total ?? 0);
-              const failed = Number(row.failedRequests ?? row.failures ?? 0);
+              const totalRaw = row.total ?? row.totalRequests;
+              const total = totalRaw != null ? Number(totalRaw) : null;
+              const failed = Number(
+                row.failed ?? row.failedRequests ?? row.failures ?? 0,
+              );
+              const ok = row.successful ?? row.successfulRequests;
+              const okNum = ok != null ? Number(ok) : null;
               const sr = row.successRatePercent;
               const avg = row.avgDurationMs;
               return (
@@ -372,17 +510,20 @@ function ByServiceTable({ rows }: { rows: ByServiceRow[] }) {
                   <td className="px-4 py-2 font-medium text-gray-800">
                     {name}
                   </td>
-                  <td className="px-4 py-2 text-right tabular-nums">
-                    {total || "—"}
+                  <td className="px-4 py-2 text-right tabular-nums text-gray-900">
+                    {total != null ? total.toLocaleString() : "—"}
                   </td>
                   <td className="px-4 py-2 text-right tabular-nums text-rose-700">
-                    {failed || "—"}
+                    {failed}
+                  </td>
+                  <td className="px-4 py-2 text-right tabular-nums text-emerald-800">
+                    {okNum != null ? okNum : "—"}
                   </td>
                   <td className="px-4 py-2 text-right tabular-nums">
                     {sr != null ? formatPct(Number(sr)) : "—"}
                   </td>
-                  <td className="px-4 py-2 text-right tabular-nums">
-                    {formatMs(avg != null ? Number(avg) : undefined)}
+                  <td className="px-4 py-2 text-right tabular-nums text-gray-700">
+                    {avg != null ? formatMsExact(Number(avg)) : "—"}
                   </td>
                 </tr>
               );
@@ -390,6 +531,51 @@ function ByServiceTable({ rows }: { rows: ByServiceRow[] }) {
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+function DiagnosticsPanel({ d }: { d: StatsDiagnostics }) {
+  const hasAny =
+    d.documentsInTimeRange != null ||
+    d.documentsAfterFilters != null ||
+    d.estimatedTotalInCollection != null;
+  if (!hasAny) return null;
+  return (
+    <div className="rounded-xl border border-amber-200/80 bg-amber-50/50 px-4 py-3 text-sm text-amber-950">
+      <p className="font-semibold text-amber-900">Diagnostics</p>
+      <dl className="mt-2 grid gap-2 sm:grid-cols-3">
+        {d.documentsInTimeRange != null ? (
+          <div className="rounded-lg bg-white/80 px-3 py-2 shadow-sm">
+            <dt className="text-xs font-medium text-amber-800/90">
+              In time range
+            </dt>
+            <dd className="tabular-nums text-lg font-semibold text-amber-950">
+              {Number(d.documentsInTimeRange).toLocaleString()}
+            </dd>
+          </div>
+        ) : null}
+        {d.documentsAfterFilters != null ? (
+          <div className="rounded-lg bg-white/80 px-3 py-2 shadow-sm">
+            <dt className="text-xs font-medium text-amber-800/90">
+              After filters
+            </dt>
+            <dd className="tabular-nums text-lg font-semibold text-amber-950">
+              {Number(d.documentsAfterFilters).toLocaleString()}
+            </dd>
+          </div>
+        ) : null}
+        {d.estimatedTotalInCollection != null ? (
+          <div className="rounded-lg bg-white/80 px-3 py-2 shadow-sm">
+            <dt className="text-xs font-medium text-amber-800/90">
+              Est. collection total
+            </dt>
+            <dd className="tabular-nums text-lg font-semibold text-amber-950">
+              {Number(d.estimatedTotalInCollection).toLocaleString()}
+            </dd>
+          </div>
+        ) : null}
+      </dl>
     </div>
   );
 }
@@ -402,7 +588,6 @@ export default function QuickStats() {
   const [customTo, setCustomTo] = useState(() => toDatetimeLocalValue(new Date()));
   const [bucket, setBucket] = useState<StatsBucket>("hour");
   const [serviceName, setServiceName] = useState("");
-  const [serverOnly, setServerOnly] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<DashboardStatsResponse | null>(null);
@@ -420,7 +605,6 @@ export default function QuickStats() {
         from,
         to,
         bucket,
-        serverOnly,
         limit: 50,
         serviceName: serviceName.trim() || undefined,
       });
@@ -435,7 +619,7 @@ export default function QuickStats() {
     } finally {
       setLoading(false);
     }
-  }, [from, to, bucket, serverOnly, serviceName]);
+  }, [from, to, bucket, serviceName]);
 
   useEffect(() => {
     fetchStats();
@@ -533,15 +717,6 @@ export default function QuickStats() {
             className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
           />
         </div>
-        <label className="flex cursor-pointer items-center gap-2 text-sm text-gray-700">
-          <input
-            type="checkbox"
-            checked={serverOnly}
-            onChange={(e) => setServerOnly(e.target.checked)}
-            className="rounded border-gray-300"
-          />
-          Server spans only
-        </label>
       </div>
 
       {loading && !data ? (
@@ -561,8 +736,37 @@ export default function QuickStats() {
         </div>
       ) : null}
 
+      {data?.period ? (
+        <div className="rounded-xl border border-slate-200 bg-slate-50/80 px-4 py-3 text-sm text-slate-800">
+          <p className="font-medium text-slate-900">Active period</p>
+          <p className="mt-1 text-slate-700">
+            {new Date(data.period.from).toLocaleString()} →{" "}
+            {new Date(data.period.to).toLocaleString()}
+            <span className="text-slate-500">
+              {" "}
+              · bucket <code className="rounded bg-white px-1">{data.period.bucket}</code>
+              {data.period.httpErrors != null ? (
+                <>
+                  {" "}
+                  · httpErrors{" "}
+                  <code className="rounded bg-white px-1">
+                    {String(data.period.httpErrors)}
+                  </code>
+                </>
+              ) : null}
+            </span>
+          </p>
+          {data.period.failureCountsAs ? (
+            <p className="mt-2 text-xs leading-relaxed text-slate-600">
+              <span className="font-semibold text-slate-700">Failure definition: </span>
+              {data.period.failureCountsAs}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
       {overview ? (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-3">
           <KpiCard
             title="Total requests"
             value={String(overview.totalRequests ?? 0)}
@@ -584,9 +788,18 @@ export default function QuickStats() {
             value={formatMs(overview.avgDurationMs)}
           />
           <KpiCard
+            title="Min / max duration"
+            value={`${formatMs(overviewMinMs(overview))} / ${formatMs(overviewMaxMs(overview))}`}
+            sub="Across sampled spans in window"
+          />
+          <KpiCard
             title="Latency p50 / p95 / p99"
-            value={`${formatMs(overview.p50)} / ${formatMs(overview.p95)} / ${formatMs(overview.p99)}`}
-            sub="Requires MongoDB $percentile"
+            value={`${formatMs(overviewP50Ms(overview))} / ${formatMs(overviewP95Ms(overview))} / ${formatMs(overviewP99Ms(overview))}`}
+            sub={
+              data?.period?.failureCountsAs
+                ? "Percentiles (MongoDB $percentile)"
+                : "Requires MongoDB $percentile"
+            }
           />
         </div>
       ) : null}
@@ -599,20 +812,20 @@ export default function QuickStats() {
         <EndpointsTable
           title="Frequently failing APIs"
           rows={data?.frequentlyFailingApis ?? []}
-          showFailures
-          showAvg
+          mode="ranked"
         />
         <EndpointsTable
-          title="Slowest APIs (avg duration)"
+          title="Slowest APIs (by avg duration)"
           rows={data?.slowestApis ?? []}
-          showFailures={false}
-          showAvg
+          mode="ranked"
         />
       </div>
 
       {data?.byService?.length ? (
         <ByServiceTable rows={data.byService} />
       ) : null}
+
+      {data?.diagnostics ? <DiagnosticsPanel d={data.diagnostics} /> : null}
     </div>
   );
 }
