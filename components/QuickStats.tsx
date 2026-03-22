@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -21,6 +22,7 @@ import {
   type ByServiceRow,
   type StatsDiagnostics,
   endpointLabel,
+  endpointTracePageId,
   failuresCount,
   successfulCount,
   endpointTotalCount,
@@ -361,6 +363,8 @@ function EndpointsTable({
   /** Full columns (same shape as frequentlyFailingApis / slowestApis) */
   mode?: "default" | "ranked";
 }) {
+  const router = useRouter();
+
   if (!rows?.length) {
     return (
       <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
@@ -387,11 +391,18 @@ function EndpointsTable({
                 <th className="px-3 py-2 text-right">Success %</th>
                 <th className="px-3 py-2 text-right">Avg ms</th>
                 <th className="px-3 py-2 text-right">Max ms</th>
+                <th className="px-3 py-2 font-mono text-[10px] normal-case tracking-normal">
+                  Span ID
+                </th>
+                <th className="px-3 py-2 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {rows.map((row, i) => {
                 const label = endpointLabel(row);
+                const pageId = endpointTracePageId(row);
+                const spanId =
+                  row.spanId != null ? String(row.spanId) : "";
                 const total = endpointTotalCount(row);
                 const failed = failuresCount(row);
                 const ok = successfulCount(row);
@@ -399,7 +410,10 @@ function EndpointsTable({
                 const avg = avgDuration(row);
                 const maxMs = maxDurationMs(row);
                 return (
-                  <tr key={i} className="hover:bg-gray-50/80">
+                  <tr
+                    key={`${i}-${pageId ?? (spanId || label)}`}
+                    className="hover:bg-gray-50/80"
+                  >
                     <td
                       className="max-w-[min(28rem,55vw)] px-3 py-2 align-top font-mono text-xs text-gray-800 break-words whitespace-normal"
                       title={label}
@@ -423,6 +437,25 @@ function EndpointsTable({
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums text-gray-700">
                       {maxMs != null ? formatMsExact(maxMs) : "—"}
+                    </td>
+                    <td
+                      className="max-w-[7rem] px-3 py-2 align-top font-mono text-[11px] text-gray-700 break-all"
+                      title={spanId || undefined}
+                    >
+                      {spanId || "—"}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-2 text-right">
+                      {pageId ? (
+                        <button
+                          type="button"
+                          onClick={() => router.push(`/trace/${pageId}`)}
+                          className="inline-flex items-center rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
+                        >
+                          View
+                        </button>
+                      ) : (
+                        <span className="text-xs text-gray-400">—</span>
+                      )}
                     </td>
                   </tr>
                 );

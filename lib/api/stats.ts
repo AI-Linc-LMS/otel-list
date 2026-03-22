@@ -64,6 +64,11 @@ export interface TimeSeriesPoint {
 
 /** Ranked endpoint / span row — field names may vary by backend */
 export interface RankedEndpoint {
+  /** Mongo document id — use for /trace/[id] */
+  id?: string;
+  _id?: string;
+  traceId?: string;
+  spanId?: string;
   method?: string;
   route?: string;
   path?: string;
@@ -216,6 +221,12 @@ export function defaultStatsRange(): { from: string; to: string } {
   const to = new Date();
   const from = new Date(to.getTime() - 24 * 60 * 60 * 1000);
   return { from: from.toISOString(), to: to.toISOString() };
+}
+
+/** Id for linking to trace detail page (`/trace/[id]`) */
+export function endpointTracePageId(row: RankedEndpoint): string | undefined {
+  const v = row.id ?? row._id;
+  return v != null && String(v).trim() !== '' ? String(v).trim() : undefined;
 }
 
 export function endpointLabel(row: RankedEndpoint): string {
